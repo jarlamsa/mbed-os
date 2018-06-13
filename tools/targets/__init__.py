@@ -14,6 +14,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
+from __future__ import print_function
 
 import os
 import binascii
@@ -65,7 +66,7 @@ def cached(func):
     """
     def wrapper(*args, **kwargs):
         """The wrapped function itself"""
-        if not CACHES.has_key((func.__name__, args)):
+        if (func.__name__, args) not in CACHES:
             CACHES[(func.__name__, args)] = func(*args, **kwargs)
         return CACHES[(func.__name__, args)]
     return wrapper
@@ -141,9 +142,10 @@ class Target(namedtuple("Target", "name json_data resolution_order resolution_or
                                     Target.__targets_json_location_default)
 
         for extra_target in Target.__extra_target_json_files:
-            for k, v in json_file_to_dict(extra_target).iteritems():
+            for k, v in json_file_to_dict(extra_target).items():
                 if k in targets:
-                    print 'WARNING: Custom target "%s" cannot replace existing target.' % k
+                    print('WARNING: Custom target "%s" cannot replace existing '
+                          'target.' % k)
                 else:
                     targets[k] = v
 
@@ -212,16 +214,16 @@ class Target(namedtuple("Target", "name json_data resolution_order resolution_or
         # inheritance level, left to right order to figure out all the
         # other classes that change the definition by adding or removing
         # elements
-        for idx in xrange(self.resolution_order[def_idx][1] - 1, -1, -1):
+        for idx in range(self.resolution_order[def_idx][1] - 1, -1, -1):
             same_level_targets = [tar[0] for tar in self.resolution_order
                                   if tar[1] == idx]
             for tar in same_level_targets:
                 data = tdata[tar]
                 # Do we have anything to add ?
-                if data.has_key(attrname + "_add"):
+                if (attrname + "_add") in data:
                     starting_value.extend(data[attrname + "_add"])
                 # Do we have anything to remove ?
-                if data.has_key(attrname + "_remove"):
+                if (attrname + "_remove") in data:
                     # Macros can be defined either without a value (MACRO)
                     # or with a value (MACRO=10). When removing, we specify
                     # only the name of the macro, without the value. So we
@@ -258,19 +260,14 @@ class Target(namedtuple("Target", "name json_data resolution_order resolution_or
             starting_value = None
             for tgt in self.resolution_order:
                 data = tdata[tgt[0]]
-                if data.has_key(attrname):
-                    starting_value = data[attrname]
-                    break
+                try:
+                    return data[attrname]
+                except KeyError:
+                    pass
             else: # Attribute not found
                 raise AttributeError(
                     "Attribute '%s' not found in target '%s'"
                     % (attrname, self.name))
-            # 'progen' needs the full path to the template (the path in JSON is
-            # relative to tools/export)
-            if attrname == "progen":
-                return self.__add_paths_to_progen(starting_value)
-            else:
-                return starting_value
 
     def __getattr__(self, attrname):
         """ Return the value of an attribute. This function only computes the
@@ -338,7 +335,7 @@ class Target(namedtuple("Target", "name json_data resolution_order resolution_or
         # "class_name" must refer to a class in this file, so check if the
         # class exists
         mdata = self.get_module_data()
-        if not mdata.has_key(class_name) or \
+        if class_name not in mdata or \
            not inspect.isclass(mdata[class_name]):
             raise HookError(
                 ("Class '%s' required by '%s' in target '%s'"
@@ -373,7 +370,7 @@ class LPCTargetCode(object):
     @staticmethod
     def lpc_patch(t_self, resources, elf, binf):
         """Patch an elf file"""
-        t_self.debug("LPC Patch: %s" % os.path.split(binf)[1])
+        t_self.notify.debug("LPC Patch: %s" % os.path.split(binf)[1])
         patch(binf)
 
 class LPC4088Code(object):
@@ -407,7 +404,7 @@ class LPC4088Code(object):
         # file to 'binf'
         shutil.rmtree(binf, True)
         os.rename(binf + '.temp', binf)
-        t_self.debug("Generated custom binary file (internal flash + SPIFI)")
+        t_self.notify.debug("Generated custom binary file (internal flash + SPIFI)")
         LPCTargetCode.lpc_patch(t_self, resources, elf, binf)
 
 class TEENSY3_1Code(object):
@@ -427,7 +424,7 @@ class MTSCode(object):
         loader = os.path.join(TOOLS_BOOTLOADERS, target_name, "bootloader.bin")
         target = binf + ".tmp"
         if not os.path.exists(loader):
-            print "Can't find bootloader binary: " + loader
+            print("Can't find bootloader binary: " + loader)
             return
         outbin = open(target, 'w+b')
         part = open(loader, 'rb')
@@ -474,8 +471,8 @@ class MCU_NRF51Code(object):
             in t_self.target.EXPECTED_SOFTDEVICES_WITH_OFFSETS:
             for hexf in resources.hex_files:
                 if hexf.find(softdevice_and_offset_entry['name']) != -1:
-                    t_self.debug("SoftDevice file found %s."
-                                 % softdevice_and_offset_entry['name'])
+                    t_self.notify.debug("SoftDevice file found %s."
+                                        % softdevice_and_offset_entry['name'])
                     sdf = hexf
 
                 if sdf is not None:
@@ -484,7 +481,7 @@ class MCU_NRF51Code(object):
                 break
 
         if sdf is None:
-            t_self.debug("Hex file not found. Aborting.")
+            t_self.notify.debug("Hex file not found. Aborting.")
             return
 
         # Look for bootloader file that matches this soft device or bootloader
@@ -493,13 +490,13 @@ class MCU_NRF51Code(object):
         if t_self.target.MERGE_BOOTLOADER is True:
             for hexf in resources.hex_files:
                 if hexf.find(t_self.target.OVERRIDE_BOOTLOADER_FILENAME) != -1:
-                    t_self.debug("Bootloader file found %s."
-                                 % t_self.target.OVERRIDE_BOOTLOADER_FILENAME)
+                    t_self.notify.debug("Bootloader file found %s."
+                                        % t_self.target.OVERRIDE_BOOTLOADER_FILENAME)
                     blf = hexf
                     break
                 elif hexf.find(softdevice_and_offset_entry['boot']) != -1:
-                    t_self.debug("Bootloader file found %s."
-                                 % softdevice_and_offset_entry['boot'])
+                    t_self.notify.debug("Bootloader file found %s."
+                                        % softdevice_and_offset_entry['boot'])
                     blf = hexf
                     break
 
@@ -513,13 +510,13 @@ class MCU_NRF51Code(object):
             binh.loadbin(binf, softdevice_and_offset_entry['offset'])
 
         if t_self.target.MERGE_SOFT_DEVICE is True:
-            t_self.debug("Merge SoftDevice file %s"
-                         % softdevice_and_offset_entry['name'])
+            t_self.notify.debug("Merge SoftDevice file %s"
+                                % softdevice_and_offset_entry['name'])
             sdh = IntelHex(sdf)
             binh.merge(sdh)
 
         if t_self.target.MERGE_BOOTLOADER is True and blf is not None:
-            t_self.debug("Merge BootLoader file %s" % blf)
+            t_self.notify.debug("Merge BootLoader file %s" % blf)
             blh = IntelHex(blf)
             binh.merge(blh)
 

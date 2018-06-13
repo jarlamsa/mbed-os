@@ -14,35 +14,38 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
+from __future__ import print_function, division, absolute_import
 
 import re
 import sys
 from os import stat, walk, getcwd, sep, remove
 from copy import copy
 from time import time, sleep
-from types import ListType
 from shutil import copyfile
-from os.path import join, splitext, exists, relpath, dirname, basename, split, abspath, isfile, isdir, normcase
+from os.path import (join, splitext, exists, relpath, dirname, basename, split,
+                     abspath, isfile, isdir, normcase)
 from itertools import chain
 from inspect import getmro
 from copy import deepcopy
 from abc import ABCMeta, abstractmethod
 from distutils.spawn import find_executable
-
 from multiprocessing import Pool, cpu_count
-from tools.utils import run_cmd, mkdir, rel_path, ToolException, NotSupportedException, split_path, compile_worker
-from tools.settings import MBED_ORG_USER
-import tools.hooks as hooks
-from tools.memap import MemapParser
 from hashlib import md5
 import fnmatch
+
+from ..utils import (run_cmd, mkdir, rel_path, ToolException,
+                    NotSupportedException, split_path, compile_worker)
+from ..settings import MBED_ORG_USER, PRINT_COMPILER_OUTPUT_AS_LINK
+from .. import hooks
+from ..notifier.term import TerminalNotifier
+from ..memap import MemapParser
 
 
 #Disables multiprocessing if set to higher number than the host machine CPUs
 CPU_COUNT_MIN = 1
 CPU_COEF = 1
 
-class LazyDict(dict):
+class LazyDict(object):
     def __init__(self):
         self.eager = {}
         self.lazy = {}
@@ -80,7 +83,7 @@ class LazyDict(dict):
     def __str__(self):
         return "Lazy{%s}" % (
             ", ".join("%r: %r" % (k, v) for k, v in
-                      chain(self.eager.iteritems(), ((k, "not evaluated")
+                      chain(self.eager.items(), ((k, "not evaluated")
                                                      for k in self.lazy))))
 
     def update(self, other):
@@ -90,10 +93,10 @@ class LazyDict(dict):
         else:
             self.eager.update(other)
 
-    def iteritems(self):
+    def items(self):
         """Warning: This forces the evaluation all of the items in this LazyDict
         that are iterated over."""
-        for k, v in self.eager.iteritems():
+        for k, v in self.eager.items():
             yield k, v
         for k in self.lazy.keys():
             yield k, self[k]
@@ -103,11 +106,11 @@ class LazyDict(dict):
         Does no computation now. Instead the comuptation is performed when a
         consumer attempts to access a value in this LazyDict"""
         new_lazy = {}
-        for k, f in self.lazy.iteritems():
+        for k, f in self.lazy.items():
             def closure(f=f):
                 return fn(f())
             new_lazy[k] = closure
-        for k, v in self.eager.iteritems():
+        for k, v in self.eager.items():
             def closure(v=v):
                 return fn(v)
             new_lazy[k] = closure
@@ -167,8 +170,7 @@ class Resources:
             self.ignored_dirs.append(directory)
 
     def add(self, resources):
-        for f,p in resources.file_basepath.items():
-            self.file_basepath[f] = p
+        self.file_basepath.update(resources.file_basepath)
 
         self.inc_dirs += resources.inc_dirs
         self.headers += resources.headers
@@ -199,6 +201,48 @@ class Resources:
 
         return self
 
+    def rewrite_basepath(self, file_name, export_path, loc):
+        """ Replace the basepath of filename with export_path
+
+        Positional arguments:
+        file_name - the absolute path to a file
+        export_path - the final destination of the file after export
+        """
+        new_f = join(loc, relpath(file_name, self.file_basepath[file_name]))
+        self.file_basepath[new_f] = export_path
+        return new_f
+
+    def subtract_basepath(self, export_path, loc=""):
+        """ Rewrite all of the basepaths with the export_path
+
+        Positional arguments:
+        export_path - the final destination of the resources with respect to the
+        generated project files
+        """
+        keys = ['s_sources', 'c_sources', 'cpp_sources', 'hex_files',
+                'objects', 'libraries', 'inc_dirs', 'headers', 'linker_script',
+                'lib_dirs']
+        for key in keys:
+            vals = getattr(self, key)
+            if isinstance(vals, set):
+                vals = list(vals)
+            if isinstance(vals, list):
+                new_vals = []
+                for val in vals:
+                    new_vals.append(self.rewrite_basepath(
+                        val, export_path, loc))
+                if isinstance(getattr(self, key), set):
+                    setattr(self, key, set(new_vals))
+                else:
+                    setattr(self, key, new_vals)
+            elif vals:
+                setattr(self, key, self.rewrite_basepath(
+                    vals, export_path, loc))
+        def closure(res, export_path=export_path, loc=loc):
+            res.subtract_basepath(export_path, loc)
+            return res
+        self.features.apply(closure)
+
     def _collect_duplicates(self, dupe_dict, dupe_headers):
         for filename in self.s_sources + self.c_sources + self.cpp_sources:
             objname, _ = splitext(basename(filename))
@@ -208,8 +252,6 @@ class Resources:
             headername = basename(filename)
             dupe_headers.setdefault(headername, set())
             dupe_headers[headername] |= set([headername])
-        for res in self.features.values():
-            res._collect_duplicates(dupe_dict, dupe_headers)
         return dupe_dict, dupe_headers
 
     def detect_duplicates(self, toolchain):
@@ -221,16 +263,16 @@ class Resources:
         """
         count = 0
         dupe_dict, dupe_headers = self._collect_duplicates(dict(), dict())
-        for objname, filenames in dupe_dict.iteritems():
+        for objname, filenames in dupe_dict.items():
             if len(filenames) > 1:
                 count+=1
-                toolchain.tool_error(
+                toolchain.notify.tool_error(
                     "Object file %s.o is not unique! It could be made from: %s"\
                     % (objname, " ".join(filenames)))
-        for headername, locations in dupe_headers.iteritems():
+        for headername, locations in dupe_headers.items():
             if len(locations) > 1:
                 count+=1
-                toolchain.tool_error(
+                toolchain.notify.tool_error(
                     "Header file %s is not unique! It could be: %s" %\
                     (headername, " ".join(locations)))
         return count
@@ -333,10 +375,12 @@ class mbedToolchain:
         "Cortex-M7F" : ["__CORTEX_M7", "ARM_MATH_CM7", "__FPU_PRESENT=1", "__CMSIS_RTOS", "__MBED_CMSIS_RTOS_CM"],
         "Cortex-M7FD" : ["__CORTEX_M7", "ARM_MATH_CM7", "__FPU_PRESENT=1", "__CMSIS_RTOS", "__MBED_CMSIS_RTOS_CM"],
         "Cortex-A9" : ["__CORTEX_A9", "ARM_MATH_CA9", "__FPU_PRESENT", "__CMSIS_RTOS", "__EVAL", "__MBED_CMSIS_RTOS_CA9"],
-        "Cortex-M23-NS": ["__CORTEX_M23", "ARM_MATH_ARMV8MBL", "__DOMAIN_NS=1", "__CMSIS_RTOS", "__MBED_CMSIS_RTOS_CM"],
+        "Cortex-M23-NS": ["__CORTEX_M23", "ARM_MATH_ARMV8MBL", "DOMAIN_NS=1", "__CMSIS_RTOS", "__MBED_CMSIS_RTOS_CM"],
         "Cortex-M23": ["__CORTEX_M23", "ARM_MATH_ARMV8MBL", "__CMSIS_RTOS", "__MBED_CMSIS_RTOS_CM"],
-        "Cortex-M33-NS": ["__CORTEX_M33", "ARM_MATH_ARMV8MML", "__DOMAIN_NS=1", "__FPU_PRESENT", "__CMSIS_RTOS", "__MBED_CMSIS_RTOS_CM"],
-        "Cortex-M33": ["__CORTEX_M33", "ARM_MATH_ARMV8MML", "__FPU_PRESENT", "__CMSIS_RTOS", "__MBED_CMSIS_RTOS_CM"],
+        "Cortex-M33-NS": ["__CORTEX_M33", "ARM_MATH_ARMV8MML", "DOMAIN_NS=1", "__CMSIS_RTOS", "__MBED_CMSIS_RTOS_CM"],
+        "Cortex-M33": ["__CORTEX_M33", "ARM_MATH_ARMV8MML", "__CMSIS_RTOS", "__MBED_CMSIS_RTOS_CM"],
+        "Cortex-M33F-NS": ["__CORTEX_M33", "ARM_MATH_ARMV8MML", "DOMAIN_NS=1", "__FPU_PRESENT", "__CMSIS_RTOS", "__MBED_CMSIS_RTOS_CM"],
+        "Cortex-M33F": ["__CORTEX_M33", "ARM_MATH_ARMV8MML", "__FPU_PRESENT", "__CMSIS_RTOS", "__MBED_CMSIS_RTOS_CM"],
     }
 
     MBED_CONFIG_FILE_NAME="mbed_config.h"
@@ -347,8 +391,8 @@ class mbedToolchain:
 
     profile_template = {'common':[], 'c':[], 'cxx':[], 'asm':[], 'ld':[]}
 
-    def __init__(self, target, notify=None, macros=None, silent=False,
-                 extra_verbose=False, build_profile=None, build_dir=None):
+    def __init__(self, target, notify=None, macros=None, build_profile=None,
+                 build_dir=None):
         self.target = target
         self.name = self.__class__.__name__
 
@@ -387,7 +431,7 @@ class mbedToolchain:
         self.build_all = False
 
         # Build output dir
-        self.build_dir = build_dir
+        self.build_dir = abspath(build_dir) if PRINT_COMPILER_OUTPUT_AS_LINK else build_dir
         self.timestamp = time()
 
         # Number of concurrent build jobs. 0 means auto (based on host system cores)
@@ -410,17 +454,9 @@ class mbedToolchain:
         #                  or an application was linked
         #       *Silent* is a boolean
         if notify:
-            self.notify_fun = notify
-        elif extra_verbose:
-            self.notify_fun = self.print_notify_verbose
+            self.notify = notify
         else:
-            self.notify_fun = self.print_notify
-
-        # Silent builds (no output)
-        self.silent = silent
-
-        # Print output buffer
-        self.output = str()
+            self.notify = TerminalNotifier()
 
         # uVisor spepcific rules
         if 'UVISOR' in self.target.features and 'UVISOR_SUPPORTED' in self.target.extra_labels:
@@ -443,65 +479,7 @@ class mbedToolchain:
         return True
 
     def get_output(self):
-        return self.output
-
-    def print_notify(self, event, silent=False):
-        """ Default command line notification
-        """
-        msg = None
-
-        if not self.VERBOSE and event['type'] == 'tool_error':
-            msg = event['message']
-
-        elif event['type'] in ['info', 'debug']:
-            msg = event['message']
-
-        elif event['type'] == 'cc':
-            event['severity'] = event['severity'].title()
-            event['file'] = basename(event['file'])
-            msg = '[%(severity)s] %(file)s@%(line)s,%(col)s: %(message)s' % event
-
-        elif event['type'] == 'progress':
-            if 'percent' in event:
-                msg = '{} [{:>5.1f}%]: {}'.format(event['action'].title(),
-                                                  event['percent'],
-                                                  basename(event['file']))
-            else:
-                msg = '{}: {}'.format(event['action'].title(),
-                                      basename(event['file']))
-
-        if msg:
-            if not silent:
-                print msg
-            self.output += msg + "\n"
-
-    def print_notify_verbose(self, event, silent=False):
-        """ Default command line notification with more verbose mode
-        """
-        if event['type'] in ['info', 'debug']:
-            self.print_notify(event, silent=silent) # standard handle
-
-        elif event['type'] == 'cc':
-            event['severity'] = event['severity'].title()
-            event['file'] = basename(event['file'])
-            event['mcu_name'] = "None"
-            event['target_name'] = event['target_name'].upper() if event['target_name'] else "Unknown"
-            event['toolchain_name'] = event['toolchain_name'].upper() if event['toolchain_name'] else "Unknown"
-            msg = '[%(severity)s] %(target_name)s::%(toolchain_name)s::%(file)s@%(line)s: %(message)s' % event
-            if not silent:
-                print msg
-            self.output += msg + "\n"
-
-        elif event['type'] == 'progress':
-            self.print_notify(event) # standard handle
-
-    # THIS METHOD IS BEING OVERRIDDEN BY THE MBED ONLINE BUILD SYSTEM
-    # ANY CHANGE OF PARAMETERS OR RETURN VALUES WILL BREAK COMPATIBILITY
-    def notify(self, event):
-        """ Little closure for notify functions
-        """
-        event['toolchain'] = self
-        return self.notify_fun(event, self.silent)
+        return self.notifier.get_output()
 
     def get_symbols(self, for_asm=False):
         if for_asm:
@@ -590,7 +568,7 @@ class mbedToolchain:
             if not d or not exists(d):
                 return True
 
-            if not self.stat_cache.has_key(d):
+            if d not in self.stat_cache:
                 self.stat_cache[d] = stat(d).st_mtime
 
             if self.stat_cache[d] >= target_mod_time:
@@ -722,11 +700,13 @@ class mbedToolchain:
     # A helper function for both scan_resources and _add_dir. _add_file adds one file
     # (*file_path*) to the resources object based on the file type.
     def _add_file(self, file_path, resources, base_path, exclude_paths=None):
-        resources.file_basepath[file_path] = base_path
 
-        if self.is_ignored(relpath(file_path, base_path)):
+        if  (self.is_ignored(relpath(file_path, base_path)) or
+             basename(file_path).startswith(".")):
+            resources.ignore_dir(relpath(file_path, base_path))
             return
 
+        resources.file_basepath[file_path] = base_path
         _, ext = splitext(file_path)
         ext = ext.lower()
 
@@ -751,7 +731,7 @@ class mbedToolchain:
 
         elif ext == self.LINKER_EXT:
             if resources.linker_script is not None:
-                self.info("Warning: Multiple linker scripts detected: %s -> %s" % (resources.linker_script, file_path))
+                self.notify.info("Warning: Multiple linker scripts detected: %s -> %s" % (resources.linker_script, file_path))
             resources.linker_script = file_path
 
         elif ext == '.lib':
@@ -793,14 +773,15 @@ class mbedToolchain:
 
     def copy_files(self, files_paths, trg_path, resources=None, rel_path=None):
         # Handle a single file
-        if type(files_paths) != ListType: files_paths = [files_paths]
+        if not isinstance(files_paths, list):
+            files_paths = [files_paths]
 
         for source in files_paths:
             if source is None:
                 files_paths.remove(source)
 
         for source in files_paths:
-            if resources is not None and resources.file_basepath.has_key(source):
+            if resources is not None and source in resources.file_basepath:
                 relative_path = relpath(source, resources.file_basepath[source])
             elif rel_path is not None:
                 relative_path = relpath(source, rel_path)
@@ -830,7 +811,7 @@ class mbedToolchain:
     def get_inc_file(self, includes):
         include_file = join(self.build_dir, ".includes_%s.txt" % self.inc_md5)
         if not exists(include_file):
-            with open(include_file, "wb") as f:
+            with open(include_file, "w") as f:
                 cmd_list = []
                 for c in includes:
                     if c:
@@ -846,7 +827,7 @@ class mbedToolchain:
     # ARM, GCC, IAR cross compatible
     def get_link_file(self, cmd):
         link_file = join(self.build_dir, ".link_files.txt")
-        with open(link_file, "wb") as f:
+        with open(link_file, "w") as f:
             cmd_list = []
             for c in cmd:
                 if c:
@@ -862,7 +843,7 @@ class mbedToolchain:
     # ARM, GCC, IAR cross compatible
     def get_arch_file(self, objects):
         archive_file = join(self.build_dir, ".archive_files.txt")
-        with open(archive_file, "wb") as f:
+        with open(archive_file, "w") as f:
             o_list = []
             for o in objects:
                 o_list.append('"%s"' % o)
@@ -878,7 +859,7 @@ class mbedToolchain:
         self.to_be_compiled = len(files_to_compile)
         self.compiled = 0
 
-        self.cc_verbose("Macros: "+' '.join(['-D%s' % s for s in self.get_symbols()]))
+        self.notify.cc_verbose("Macros: "+' '.join(['-D%s' % s for s in self.get_symbols()]))
 
         inc_paths = resources.inc_dirs
         if inc_dirs is not None:
@@ -891,7 +872,7 @@ class mbedToolchain:
         # Sort include paths for consistency
         inc_paths = sorted(set(inc_paths))
         # Unique id of all include paths
-        self.inc_md5 = md5(' '.join(inc_paths)).hexdigest()
+        self.inc_md5 = md5(' '.join(inc_paths).encode('utf-8')).hexdigest()
 
         objects = []
         queue = []
@@ -937,7 +918,7 @@ class mbedToolchain:
             self.compiled += 1
             self.progress("compile", item['source'], build_update=True)
             for res in result['results']:
-                self.cc_verbose("Compile: %s" % ' '.join(res['command']), result['source'])
+                self.notify.cc_verbose("Compile: %s" % ' '.join(res['command']), result['source'])
                 self.compile_output([
                     res['code'],
                     res['output'],
@@ -967,7 +948,7 @@ class mbedToolchain:
             sleep(0.01)
             pending = 0
             for r in results:
-                if r._ready is True:
+                if r.ready():
                     try:
                         result = r.get()
                         results.remove(r)
@@ -975,14 +956,14 @@ class mbedToolchain:
                         self.compiled += 1
                         self.progress("compile", result['source'], build_update=True)
                         for res in result['results']:
-                            self.cc_verbose("Compile: %s" % ' '.join(res['command']), result['source'])
+                            self.notify.cc_verbose("Compile: %s" % ' '.join(res['command']), result['source'])
                             self.compile_output([
                                 res['code'],
                                 res['output'],
                                 res['command']
                             ])
                         objects.append(result['object'])
-                    except ToolException, err:
+                    except ToolException as err:
                         if p._taskqueue.queue:
                             p._taskqueue.queue.clear()
                             sleep(0.5)
@@ -1005,12 +986,14 @@ class mbedToolchain:
         _, ext = splitext(source)
         ext = ext.lower()
 
+        source = abspath(source) if PRINT_COMPILER_OUTPUT_AS_LINK else source
+
         if ext == '.c' or  ext == '.cpp':
             base, _ = splitext(object)
             dep_path = base + '.d'
             try:
                 deps = self.parse_dependencies(dep_path) if (exists(dep_path)) else []
-            except IOError, IndexError:
+            except (IOError, IndexError):
                 deps = []
             config_file = ([self.config.app_config_location]
                            if self.config.app_config_location else [])
@@ -1054,7 +1037,7 @@ class mbedToolchain:
             buff[0] = re.sub('^(.*?)\: ', '', buff[0])
             for line in buff:
                 filename = line.replace('\\\n', '').strip()
-                if file:
+                if filename:
                     filename = filename.replace('\\ ', '\a')
                     dependencies.extend(((self.CHROOT if self.CHROOT else '') +
                                          f.replace('\a', ' '))
@@ -1086,9 +1069,9 @@ class mbedToolchain:
 
         # Parse output for Warnings and Errors
         self.parse_output(_stderr)
-        self.debug("Return: %s"% _rc)
+        self.notify.debug("Return: %s"% _rc)
         for error_line in _stderr.splitlines():
-            self.debug("Output: %s"% error_line)
+            self.notify.debug("Output: %s"% error_line)
 
         # Check return code
         if _rc != 0:
@@ -1102,7 +1085,7 @@ class mbedToolchain:
         lib = self.STD_LIB_NAME % name
         fout = join(dir, lib)
         if self.need_update(fout, objects):
-            self.info("Library: %s" % lib)
+            self.notify.info("Library: %s" % lib)
             self.archive(objects, fout)
             needed_update = True
 
@@ -1115,7 +1098,7 @@ class mbedToolchain:
             ext = self.target.OUTPUT_EXT
 
         if hasattr(self.target, 'OUTPUT_NAMING'):
-            self.var("binary_naming", self.target.OUTPUT_NAMING)
+            self.notify.var("binary_naming", self.target.OUTPUT_NAMING)
             if self.target.OUTPUT_NAMING == "8.3":
                 name = name[0:8]
                 ext = ext[0:3]
@@ -1126,8 +1109,10 @@ class mbedToolchain:
         mkdir(new_path)
 
         filename = name+'.'+ext
+        # Absolute path of the final linked file
+        full_path = join(tmp_path, filename)
         elf = join(tmp_path, name + '.elf')
-        bin = None if ext is 'elf' else join(tmp_path, filename)
+        bin = None if ext == 'elf' else full_path
         map = join(tmp_path, name + '.map')
 
         r.objects = sorted(set(r.objects))
@@ -1148,63 +1133,33 @@ class mbedToolchain:
         # Initialize memap and process map file. This doesn't generate output.
         self.mem_stats(map)
 
-        self.var("compile_succeded", True)
-        self.var("binary", filename)
+        self.notify.var("compile_succeded", True)
+        self.notify.var("binary", filename)
 
-        return bin, needed_update
+        return full_path, needed_update
 
     # THIS METHOD IS BEING OVERRIDDEN BY THE MBED ONLINE BUILD SYSTEM
     # ANY CHANGE OF PARAMETERS OR RETURN VALUES WILL BREAK COMPATIBILITY
     def default_cmd(self, command):
         _stdout, _stderr, _rc = run_cmd(command, work_dir=getcwd(), chroot=self.CHROOT)
-        self.debug("Return: %s"% _rc)
+        self.notify.debug("Return: %s"% _rc)
 
         for output_line in _stdout.splitlines():
-            self.debug("Output: %s"% output_line)
+            self.notify.debug("Output: %s"% output_line)
         for error_line in _stderr.splitlines():
-            self.debug("Errors: %s"% error_line)
+            self.notify.debug("Errors: %s"% error_line)
 
         if _rc != 0:
             for line in _stderr.splitlines():
-                self.tool_error(line)
+                self.notify.tool_error(line)
             raise ToolException(_stderr)
 
-    ### NOTIFICATIONS ###
-    def info(self, message):
-        self.notify({'type': 'info', 'message': message})
-
-    # THIS METHOD IS BEING OVERRIDDEN BY THE MBED ONLINE BUILD SYSTEM
-    # ANY CHANGE OF PARAMETERS OR RETURN VALUES WILL BREAK COMPATIBILITY
-    def debug(self, message):
-        if self.VERBOSE:
-            if type(message) is ListType:
-                message = ' '.join(message)
-            message = "[DEBUG] " + message
-            self.notify({'type': 'debug', 'message': message})
-
-    # THIS METHOD IS BEING OVERRIDDEN BY THE MBED ONLINE BUILD SYSTEM
-    # ANY CHANGE OF PARAMETERS OR RETURN VALUES WILL BREAK COMPATIBILITY
-    def cc_info(self, info=None):
-        if info is not None:
-            info['type'] = 'cc'
-            self.notify(info)
-
-    # THIS METHOD IS BEING OVERRIDDEN BY THE MBED ONLINE BUILD SYSTEM
-    # ANY CHANGE OF PARAMETERS OR RETURN VALUES WILL BREAK COMPATIBILITY
-    def cc_verbose(self, message, file=""):
-        self.debug(message)
-
     def progress(self, action, file, build_update=False):
-        msg = {'type': 'progress', 'action': action, 'file': file}
         if build_update:
-            msg['percent'] = 100. * float(self.compiled) / float(self.to_be_compiled)
-        self.notify(msg)
-
-    def tool_error(self, message):
-        self.notify({'type': 'tool_error', 'message': message})
-
-    def var(self, key, value):
-        self.notify({'type': 'var', 'key': key, 'val': value})
+            percent = 100. * float(self.compiled) / float(self.to_be_compiled)
+        else:
+            percent = None
+        self.notify.progress(action, file, percent)
 
     # THIS METHOD IS BEING OVERRIDDEN BY THE MBED ONLINE BUILD SYSTEM
     # ANY CHANGE OF PARAMETERS OR RETURN VALUES WILL BREAK COMPATIBILITY
@@ -1220,7 +1175,7 @@ class mbedToolchain:
 
         # Parse and decode a map file
         if memap.parse(abspath(map), toolchain) is False:
-            self.info("Unknown toolchain for memory statistics %s" % toolchain)
+            self.notify.info("Unknown toolchain for memory statistics %s" % toolchain)
             return None
 
         # Store the memap instance for later use
@@ -1234,8 +1189,10 @@ class mbedToolchain:
     def add_regions(self):
         """Add regions to the build profile, if there are any.
         """
-        print("Using regions in this build:")
-        for region in self.config.regions:
+        regions = list(self.config.regions)
+        self.notify.info("Using regions %s in this build."
+                         % ", ".join(region.name for region in regions))
+        for region in regions:
             for define in [(region.name.upper() + "_ADDR", region.start),
                            (region.name.upper() + "_SIZE", region.size)]:
                 define_string = "-D%s=0x%x" %  define
@@ -1248,8 +1205,8 @@ class mbedToolchain:
                     define_string = self.make_ld_define(*define)
                     self.ld.append(define_string)
                     self.flags["ld"].append(define_string)
-            print("  Region %s size 0x%x, offset 0x%x"
-                    % (region.name, region.size, region.start))
+            self.notify.info("  Region %s: size 0x%x, offset 0x%x"
+                             % (region.name, region.size, region.start))
 
     # Set the configuration data
     def set_config_data(self, config_data):
@@ -1274,7 +1231,7 @@ class mbedToolchain:
         self.config_file = join(self.build_dir, self.MBED_CONFIG_FILE_NAME)
         # If the file exists, read its current content in prev_data
         if exists(self.config_file):
-            with open(self.config_file, "rt") as f:
+            with open(self.config_file, "r") as f:
                 prev_data = f.read()
         else:
             prev_data = None
@@ -1288,12 +1245,12 @@ class mbedToolchain:
                 self.config_file = None # this means "config file not present"
                 changed = True
             elif crt_data != prev_data: # different content of config file
-                with open(self.config_file, "wt") as f:
+                with open(self.config_file, "w") as f:
                     f.write(crt_data)
                 changed = True
         else: # a previous mbed_config.h does not exist
             if crt_data is not None: # there's configuration data available
-                with open(self.config_file, "wt") as f:
+                with open(self.config_file, "w") as f:
                     f.write(crt_data)
                 changed = True
             else:
@@ -1318,7 +1275,7 @@ class mbedToolchain:
     @staticmethod
     def _overwrite_when_not_equal(filename, content):
         if not exists(filename) or content != open(filename).read():
-            with open(filename, "wb") as out:
+            with open(filename, "w") as out:
                 out.write(content)
 
     @staticmethod
@@ -1605,11 +1562,11 @@ from tools.toolchains.gcc import GCC_ARM
 from tools.toolchains.iar import IAR
 
 TOOLCHAIN_CLASSES = {
-    'ARM': ARM_STD,
-    'uARM': ARM_MICRO,
-    'ARMC6': ARMC6,
-    'GCC_ARM': GCC_ARM,
-    'IAR': IAR
+    u'ARM': ARM_STD,
+    u'uARM': ARM_MICRO,
+    u'ARMC6': ARMC6,
+    u'GCC_ARM': GCC_ARM,
+    u'IAR': IAR
 }
 
 TOOLCHAINS = set(TOOLCHAIN_CLASSES.keys())

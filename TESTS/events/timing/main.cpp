@@ -24,6 +24,9 @@
 
 using namespace utest::v1;
 
+#if !DEVICE_USTICKER
+  #error [NOT_SUPPORTED] test not supported
+#endif
 
 // Test delay
 #ifndef TEST_EVENTS_TIMING_TIME
@@ -107,7 +110,10 @@ void semaphore_timing_test() {
         equeue_sema_wait(&sema, delay);
         int taken = timer.read_us() - start;
 
-        printf("delay %dms => error %dus\r\n", delay, abs(1000*delay - taken));
+        if (taken < (delay * 1000 - 5000) || taken > (delay * 1000 + 5000)) {
+            printf("delay %dms => error %dus\r\n", delay, abs(1000 * delay - taken));
+        }
+
         TEST_ASSERT_INT_WITHIN(5000, taken, delay * 1000);
 
         led = !led;
