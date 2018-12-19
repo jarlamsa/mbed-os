@@ -38,11 +38,17 @@ SPI::SPI(PinName mosi, PinName miso, PinName sclk, PinName ssel) :
 #endif
     _bits(8),
     _mode(0),
+    dedicated_bus(false),
     _hz(1000000),
     _write_fill(SPI_FILL_CHAR)
 {
-    // No lock needed in the constructor
+    // Don't know if spi_init might mess with settings, so take the lock
+    lock();
     spi_init(&_spi, mosi, miso, sclk, ssel);
+    // This makes us the owner, acknowledging that spi_init may have messed with settings, and then
+    // sets the settings we want.
+    _acquire();
+    unlock();
 }
 
 SPI::~SPI()
@@ -60,10 +66,8 @@ void SPI::format(int bits, int mode)
     // If changing format while you are the owner then just
     // update format, but if owner is changed then even frequency should be
     // updated which is done by acquire.
-    if (_owner == this) {
+    if (dedicated_bus || _owner == this) {
         spi_format(&_spi, _bits, _mode, 0);
-    } else {
-        _acquire();
     }
     unlock();
 }
@@ -75,10 +79,8 @@ void SPI::frequency(int hz)
     // If changing format while you are the owner then just
     // update frequency, but if owner is changed then even frequency should be
     // updated which is done by acquire.
-    if (_owner == this) {
+    if (dedicated_bus || _owner == this) {
         spi_frequency(&_spi, _hz);
-    } else {
-        _acquire();
     }
     unlock();
 }
@@ -90,18 +92,14 @@ SingletonPtr<PlatformMutex> SPI::_mutex;
 void SPI::aquire()
 {
     lock();
-    if (_owner != this) {
-        spi_format(&_spi, _bits, _mode, 0);
-        spi_frequency(&_spi, _hz);
-        _owner = this;
-    }
+    _acquire();
     unlock();
 }
 
 // Note: Private function with no locking
 void SPI::_acquire()
 {
-    if (_owner != this) {
+    if (!dedicated_bus &&_owner != this) {
         spi_format(&_spi, _bits, _mode, 0);
         spi_frequency(&_spi, _hz);
         _owner = this;
@@ -128,12 +126,21 @@ int SPI::write(const char *tx_buffer, int tx_length, char *rx_buffer, int rx_len
 
 void SPI::lock()
 {
-    _mutex->lock();
+    if (!dedicated_bus) {
+        _mutex->lock();
+    }
 }
 
 void SPI::unlock()
 {
-    _mutex->unlock();
+    if (!dedicated_bus) {
+        _mutex->unlock();
+    }
+}
+
+void SPI::set_dedicated(bool dedicated)
+{
+    dedicated_bus = dedicated;
 }
 
 void SPI::set_default_write_value(char data)
