@@ -25,6 +25,10 @@
 #include "ns_event_loop.h"
 #include "multicast_api.h"
 
+#include "fhss_api.h"
+#include "fhss_config.h"
+#include "net_fhss.h"
+
 // For tracing we need to define flag, have include and define group
 #define HAVE_DEBUG 1
 #include "ns_trace.h"
@@ -71,6 +75,10 @@ typedef struct {
 /* Tasklet data */
 static tasklet_data_str_t *tasklet_data_ptr = NULL;
 static mac_api_t *mac_api = NULL;
+static fhss_api_t *fhss_api = NULL;
+extern fhss_timer_t fhss_functions;
+
+static fhss_configuration_t fhss_configuration;
 
 /* private function prototypes */
 void nd_tasklet_main(arm_event_s *event);
@@ -257,6 +265,12 @@ void nd_tasklet_configure_and_connect_to_network(void)
         MBED_CONF_MBED_MESH_API_6LOWPAN_ND_SEC_LEVEL,
         &tasklet_data_ptr->psk_sec_info);
 
+    arm_nwk_6lowpan_gp_address_mode(
+        tasklet_data_ptr->network_interface_id,
+        NET_6LOWPAN_GP64_ADDRESS,
+        0xffff,
+        1);
+
     // configure scan parameters
     arm_nwk_6lowpan_link_scan_parameter_set(tasklet_data_ptr->network_interface_id, 5);
 
@@ -265,7 +279,8 @@ void nd_tasklet_configure_and_connect_to_network(void)
 
     // Configure scan options (NULL disables filter)
     arm_nwk_6lowpan_link_nwk_id_filter_for_nwk_scan(
-        tasklet_data_ptr->network_interface_id, NULL);
+        tasklet_data_ptr->network_interface_id,
+        MBED_CONF_MBED_MESH_API_6LOWPAN_ND_NETWORK_FILTER);
 
     arm_nwk_6lowpan_link_panid_filter_for_nwk_scan(
         tasklet_data_ptr->network_interface_id,
@@ -421,6 +436,24 @@ void nd_tasklet_init(void)
     }
 }
 
+void nd_tasklet_fhss_init(void)
+{
+    memset(&fhss_configuration, 0, sizeof(fhss_configuration_t));
+
+    fhss_configuration.fhss_tuning_parameters.tx_processing_delay = 0;
+    fhss_configuration.fhss_tuning_parameters.rx_processing_delay = 0;
+    fhss_configuration.fhss_tuning_parameters.ack_processing_delay =0;
+
+    fhss_configuration.fhss_max_synch_interval = 240;
+    fhss_configuration.fhss_number_of_channel_retries = 1;
+    fhss_configuration.channel_mask[0] = 0x01ffffff;
+
+    fhss_timer_t *fhss_timer_ptr = &fhss_functions;
+
+    fhss_api = ns_fhss_create(&fhss_configuration, fhss_timer_ptr, NULL);
+    ns_sw_mac_fhss_register(mac_api, fhss_api);
+}
+
 int8_t nd_tasklet_network_init(int8_t device_id)
 {
     // TODO, read interface name from configuration
@@ -432,6 +465,7 @@ int8_t nd_tasklet_network_init(int8_t device_id)
     if (!mac_api) {
         mac_api = ns_sw_mac_create(device_id, &storage_sizes);
     }
+    nd_tasklet_fhss_init();
     return arm_nwk_interface_lowpan_init(mac_api, INTERFACE_NAME);
 }
 

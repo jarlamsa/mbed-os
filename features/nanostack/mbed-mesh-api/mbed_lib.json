@@ -33,6 +33,10 @@
             "help": "Beacon PAN ID filter, 0xffff means no filtering. [0-0xffff]",
             "value": "0xffff"
         },
+        "6lowpan-nd-network-filter": {
+            "help": "Network filter, null means no filtering.",
+            "value": "\"pre_wisun_test01\""
+        },
         "6lowpan-nd-security-mode": {
             "help": "NONE or PSK to use either no security, or pre-shared network key.",
             "value": "NONE"
