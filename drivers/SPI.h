@@ -209,6 +209,8 @@ public:
      */
     int set_dma_usage(DMAUsage usage);
 
+    void set_dedicated(bool dedicated);
+
 #if !defined(DOXYGEN_ONLY)
 protected:
     /** SPI interrupt handler.
@@ -323,6 +325,8 @@ protected:
     int _hz;
     /* Default character used for NULL transfers */
     char _write_fill;
+
+    bool dedicated_bus;
 
 private:
     /** Private acquire function without locking/unlocking.
