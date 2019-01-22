@@ -25,9 +25,11 @@
 #include "ns_event_loop.h"
 #include "multicast_api.h"
 
+#if MBED_CONF_MBED_MESH_API_6LOWPAN_ND_USE_FHSS == 1
 #include "fhss_api.h"
 #include "fhss_config.h"
 #include "net_fhss.h"
+#endif
 
 // For tracing we need to define flag, have include and define group
 #define HAVE_DEBUG 1
@@ -68,6 +70,9 @@ typedef struct {
     net_6lowpan_mode_e mode;
     net_6lowpan_link_layer_sec_mode_e sec_mode;
     net_link_layer_psk_security_info_s psk_sec_info;
+#if MBED_CONF_MBED_MESH_API_6LOWPAN_ND_USE_FHSS == 1
+    fhss_configuration_t fhss_configuration;
+#endif
     int8_t network_interface_id;
     int8_t tasklet;
 } tasklet_data_str_t;
@@ -75,10 +80,10 @@ typedef struct {
 /* Tasklet data */
 static tasklet_data_str_t *tasklet_data_ptr = NULL;
 static mac_api_t *mac_api = NULL;
+#if MBED_CONF_MBED_MESH_API_6LOWPAN_ND_USE_FHSS == 1
 static fhss_api_t *fhss_api = NULL;
 extern fhss_timer_t fhss_functions;
-
-static fhss_configuration_t fhss_configuration;
+#endif
 
 /* private function prototypes */
 void nd_tasklet_main(arm_event_s *event);
@@ -436,23 +441,25 @@ void nd_tasklet_init(void)
     }
 }
 
+#if MBED_CONF_MBED_MESH_API_6LOWPAN_ND_USE_FHSS == 1
 void nd_tasklet_fhss_init(void)
 {
-    memset(&fhss_configuration, 0, sizeof(fhss_configuration_t));
+    memset(&tasklet_data_ptr->fhss_configuration, 0, sizeof(fhss_configuration_t));
 
-    fhss_configuration.fhss_tuning_parameters.tx_processing_delay = 0;
-    fhss_configuration.fhss_tuning_parameters.rx_processing_delay = 0;
-    fhss_configuration.fhss_tuning_parameters.ack_processing_delay =0;
+    tasklet_data_ptr->fhss_configuration.fhss_tuning_parameters.tx_processing_delay = 0;
+    tasklet_data_ptr->fhss_configuration.fhss_tuning_parameters.rx_processing_delay = 0;
+    tasklet_data_ptr->fhss_configuration.fhss_tuning_parameters.ack_processing_delay =0;
 
-    fhss_configuration.fhss_max_synch_interval = 240;
-    fhss_configuration.fhss_number_of_channel_retries = 1;
-    fhss_configuration.channel_mask[0] = 0x01ffffff;
+    tasklet_data_ptr->fhss_configuration.fhss_max_synch_interval = 240;
+    tasklet_data_ptr->fhss_configuration.fhss_number_of_channel_retries = 1;
+    tasklet_data_ptr->fhss_configuration.channel_mask[0] = MBED_CONF_MBED_MESH_API_6LOWPAN_ND_CHANNEL_MASK;
 
     fhss_timer_t *fhss_timer_ptr = &fhss_functions;
 
-    fhss_api = ns_fhss_create(&fhss_configuration, fhss_timer_ptr, NULL);
+    fhss_api = ns_fhss_create(&tasklet_data_ptr->fhss_configuration, fhss_timer_ptr, NULL);
     ns_sw_mac_fhss_register(mac_api, fhss_api);
 }
+#endif
 
 int8_t nd_tasklet_network_init(int8_t device_id)
 {
@@ -465,7 +472,9 @@ int8_t nd_tasklet_network_init(int8_t device_id)
     if (!mac_api) {
         mac_api = ns_sw_mac_create(device_id, &storage_sizes);
     }
+#if MBED_CONF_MBED_MESH_API_6LOWPAN_ND_USE_FHSS == 1
     nd_tasklet_fhss_init();
+#endif
     return arm_nwk_interface_lowpan_init(mac_api, INTERFACE_NAME);
 }
 
