@@ -2863,8 +2863,10 @@
         "features": [
             "LWIP"
         ],
-        "device_name": "MIMXRT1052",
+        "device_name": "MIMXRT1052DVL6B",
         "bootloader_supported": true,
+        "mbed_rom_start": "0x60000000",
+        "mbed_rom_size": "0x400000",
         "overrides": {
             "deep-sleep-latency": 5,
             "network-default-interface-type": "ETHERNET"
@@ -3157,7 +3159,7 @@
             "secure-ram-start": "0x30000000",
             "secure-ram-size": "0x22000"
         }
-    },    
+    },
     "HANI_IOT": {
         "inherits": ["LPC55S69_NS"],
         "detect_code": ["0360"],
